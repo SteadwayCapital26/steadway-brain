@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Steadway Brain - sign in</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background: #f5f5f2; color: #1d2a35; margin: 0; }
+  main { max-width: 440px; margin: 64px auto; background: #fff; border: 1px solid #dcdcd6; border-radius: 8px; padding: 28px 32px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #5b6670; font-size: 13px; margin: 0 0 22px; }
+  label { display: block; font-size: 13px; margin: 14px 0 6px; }
+  input { width: 100%; box-sizing: border-box; padding: 9px 10px; font-size: 15px; border: 1px solid #c4c4bd; border-radius: 5px; }
+  button { margin-top: 16px; padding: 9px 16px; font-size: 14px; border-radius: 5px; border: 1px solid #1d2a35; background: #1d2a35; color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: #1d2a35; }
+  button:disabled { opacity: .5; cursor: default; }
+  dl { font-size: 14px; margin: 0; }
+  dt { color: #5b6670; font-size: 12px; margin-top: 12px; }
+  dd { margin: 2px 0 0; word-break: break-all; }
+  .msg { font-size: 13px; margin-top: 16px; color: #5b6670; }
+  .err { color: #a3261b; }
+  .hidden { display: none; }
+  .row button { margin-right: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Steadway Brain</h1>
+  <p class="sub">Sign in and approve a connection. Only allowlisted Steadway users can use the data.</p>
+
+  <section id="signin" class="hidden">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="email">
+    <button id="send">Send sign-in code</button>
+    <div id="codebox" class="hidden">
+      <label for="code">Code from the email</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code">
+      <button id="verify">Sign in</button>
+    </div>
+  </section>
+
+  <section id="consent" class="hidden">
+    <dl>
+      <dt>Signed in as</dt><dd id="who"></dd>
+      <dt>Application asking for access</dt><dd id="client"></dd>
+      <dt>Will return to</dt><dd id="redirect"></dd>
+      <dt>Requested scope</dt><dd id="scope"></dd>
+    </dl>
+    <div class="row">
+      <button id="approve">Approve</button>
+      <button id="deny" class="secondary">Deny</button>
+    </div>
+  </section>
+
+  <section id="idle" class="hidden">
+    <p class="msg">There is no connection request to approve. This page opens when a client such as claude.ai asks to connect to Steadway Brain.</p>
+  </section>
+
+  <p id="status" class="msg"></p>
+  <button id="signout" class="secondary hidden">Sign out</button>
+</main>
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+const SUPABASE_URL = 'https://jssiytyftcszqpaftshb.supabase.co';
+const PUBLISHABLE_KEY = 'sb_publishable_rOEqUthfMmVKu3DNiIyL5w_m9M4QpOO';
+const sb = createClient(SUPABASE_URL, PUBLISHABLE_KEY, {
+  auth: { persistSession: true, detectSessionInUrl: true, flowType: 'implicit' }
+});
+
+const $ = (id) => document.getElementById(id);
+const show = (id, on = true) => $(id).classList.toggle('hidden', !on);
+const status = (text, isErr = false) => { $('status').textContent = text; $('status').classList.toggle('err', isErr); };
+
+const params = new URLSearchParams(location.search);
+const authorizationId = params.get('authorization_id');
+
+async function render() {
+  const { data: { session } } = await sb.auth.getSession();
+  show('signout', !!session);
+  if (!session) { show('signin'); show('consent', false); show('idle', false); return; }
+  show('signin', false);
+  if (!authorizationId) { show('idle'); status('Signed in as ' + session.user.email + '.'); return; }
+
+  status('Loading the request...');
+  const { data, error } = await sb.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error) { status('Could not load the request: ' + error.message, true); return; }
+  if (data && !('authorization_id' in data) && (data.redirect_url || data.redirect_to)) {
+    status('Already approved. Returning to the application...');
+    location.href = data.redirect_url || data.redirect_to;
+    return;
+  }
+  $('who').textContent = session.user.email;
+  $('client').textContent = (data.client && (data.client.name || data.client.client_name || data.client.id)) || 'Unknown client';
+  $('redirect').textContent = data.redirect_uri || '';
+  $('scope').textContent = (data.scope && data.scope.trim()) ? data.scope : '(none)';
+  show('consent');
+  status('');
+}
+
+$('send').onclick = async () => {
+  const email = $('email').value.trim();
+  if (!email) return;
+  $('send').disabled = true;
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { shouldCreateUser: false, emailRedirectTo: location.href }
+  });
+  $('send').disabled = false;
+  if (error) { status('Could not send the code: ' + error.message, true); return; }
+  show('codebox');
+  status('Check your email. Type the code here, or open the link in the email in this same browser.');
+};
+
+$('verify').onclick = async () => {
+  const email = $('email').value.trim();
+  const token = $('code').value.trim();
+  if (!token) return;
+  $('verify').disabled = true;
+  const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
+  $('verify').disabled = false;
+  if (error) { status('Code not accepted: ' + error.message, true); return; }
+  await render();
+};
+
+async function decide(approve) {
+  $('approve').disabled = true; $('deny').disabled = true;
+  const fn = approve ? sb.auth.oauth.approveAuthorization : sb.auth.oauth.denyAuthorization;
+  const { data, error } = await fn.call(sb.auth.oauth, authorizationId);
+  if (error) { status('Failed: ' + error.message, true); $('approve').disabled = false; $('deny').disabled = false; return; }
+  status(approve ? 'Approved. Returning to the application...' : 'Denied. Returning to the application...');
+  location.href = data.redirect_url || data.redirect_to;
+}
+$('approve').onclick = () => decide(true);
+$('deny').onclick = () => decide(false);
+
+$('signout').onclick = async () => { await sb.auth.signOut(); status('Signed out.'); await render(); };
+
+sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_IN') render(); });
+render().catch((e) => status('Error: ' + e.message, true));
+</script>
+</body>
+</html>
